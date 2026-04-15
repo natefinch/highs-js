@@ -509,6 +509,10 @@ function test_error_includes_stderr(Module) {
       e.message.includes('Unable to read LP model'),
       'Should include the action description'
     );
+    assert.ok(
+      e.message.includes('Solver output:'),
+      'Should include the solver stderr section marker'
+    );
   }
 }
 

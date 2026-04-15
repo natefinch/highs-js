@@ -52,6 +52,12 @@ const MODEL_STATUS_CODES = /** @type {const} */ ({
 
 /** @typedef {Object} Highs */
 
+// Statuses that don't produce a parseable solution table
+const STATUSES_WITHOUT_SOLUTION = new Set([
+  "Not Set", "Load error", "Model error", "Presolve error",
+  "Solve error", "Postsolve error", "Empty", "Unknown",
+]);
+
 var /** @type {()=>Highs} */ _Highs_create,
   /** @type {(arg0:Highs)=>void} */ _Highs_run,
   /** @type {(arg0:Highs)=>void} */ _Highs_destroy,
@@ -61,7 +67,7 @@ var /** @type {()=>Highs} */ _Highs_create,
 /**
  * Validate an LP string for known issues that cause opaque HiGHS parse failures.
  * Only validates when the input is a string (Buffer inputs are skipped).
- * @param {string} model_str
+ * @param {string | Uint8Array} model_str
  */
 function validateLP(model_str) {
   if (typeof model_str !== "string") return;
@@ -103,7 +109,7 @@ function validateLP(model_str) {
 
 /**
  * Solve a model in the CPLEX LP file format.
- * @param {string} model_str The problem to solve in the .lp format
+ * @param {string | Uint8Array} model_str The problem to solve in the .lp format
  * @param {undefined | import("../types").HighsOptions} highs_options Options to pass the solver. See https://github.com/ERGO-Code/HiGHS/blob/v1.14.0/highs/lp_data/HighsOptions.h
  * @returns {import("../types").HighsSolution} The solution
  */
@@ -145,15 +151,9 @@ Module["solve"] = function (model_str, highs_options) {
     // Snapshot solver logs before clearing stdout for solution parsing
     const solverOutput = stderr_lines.slice();
 
-    // Statuses that don't produce a parseable solution table
-    const STATUSES_WITHOUT_SOLUTION = new Set([
-      "Not Set", "Load error", "Model error", "Presolve error",
-      "Solve error", "Postsolve error", "Empty", "Unknown",
-    ]);
-
     if (STATUSES_WITHOUT_SOLUTION.has(status)) {
       return {
-        "Status": /** @type {"Infeasible"} */ (status),
+        "Status": /** @type {import("../types").HighsModelStatus} */ (status),
         "Columns": {},
         "Rows": [],
         "ObjectiveValue": 0,
@@ -240,7 +240,7 @@ function parseResult(lines, status) {
     throw new Error("Unable to parse solution. Too few lines.");
 
   var result = {
-    "Status": /** @type {"Infeasible"} */ (status),
+    "Status": /** @type {import("../types").HighsModelStatus} */ (status),
     "Columns": {},
     "Rows": [],
     "ObjectiveValue": NaN,
