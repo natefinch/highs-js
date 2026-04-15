@@ -1,4 +1,5 @@
 const MODEL_FILENAME = "m.lp";
+const LP_MAX_LINE_LENGTH = 560;
 
 Module.Highs_readModel = Module["cwrap"]("Highs_readModel", "number", [
   "number",
@@ -51,6 +52,12 @@ const MODEL_STATUS_CODES = /** @type {const} */ ({
 
 /** @typedef {Object} Highs */
 
+// Statuses that don't produce a parseable solution table
+const STATUSES_WITHOUT_SOLUTION = new Set([
+  "Not Set", "Load error", "Model error", "Presolve error",
+  "Solve error", "Postsolve error", "Empty", "Unknown",
+]);
+
 var /** @type {()=>Highs} */ _Highs_create,
   /** @type {(arg0:Highs)=>void} */ _Highs_run,
   /** @type {(arg0:Highs)=>void} */ _Highs_destroy,
@@ -58,50 +65,117 @@ var /** @type {()=>Highs} */ _Highs_create,
   /** @type {any}*/ FS;
 
 /**
+ * Validate an LP string for known issues that cause opaque HiGHS parse failures.
+ * Only validates when the input is a string (Buffer inputs are skipped).
+ * @param {string | Uint8Array} model_str
+ */
+function validateLP(model_str) {
+  if (typeof model_str !== "string") return;
+
+  // Check for NaN literals (word-boundary match to avoid false positives on variable names)
+  const nanMatch = model_str.match(/\bNaN\b/);
+  if (nanMatch) {
+    const pos = nanMatch.index;
+    const context = model_str.substring(
+      Math.max(0, pos - 30),
+      Math.min(model_str.length, pos + 30)
+    );
+    throw new Error(
+      `LP string contains NaN at position ${pos}: ...${context}...`
+    );
+  }
+
+  // Check for lines exceeding HiGHS's internal buffer (LP_MAX_LINE_LENGTH = 560)
+  const lines = model_str.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].length > LP_MAX_LINE_LENGTH) {
+      const preview = lines[i].substring(0, 80);
+      throw new Error(
+        `LP line ${i + 1} is ${lines[i].length} characters, exceeding HiGHS's ` +
+          `${LP_MAX_LINE_LENGTH}-character line buffer. ` +
+          `Use continuation lines to split long expressions. ` +
+          `Line preview: "${preview}..."`
+      );
+    }
+  }
+
+  // Check for missing End marker (case-insensitive)
+  if (!/^\s*end\s*$/im.test(model_str)) {
+    throw new Error(
+      "LP string is missing the required 'End' marker"
+    );
+  }
+}
+
+/**
  * Solve a model in the CPLEX LP file format.
- * @param {string} model_str The problem to solve in the .lp format
- * @param {undefined | import("../types").HighsOptions} highs_options Options to pass the solver. See https://github.com/ERGO-Code/HiGHS/blob/v1.8.0/src/lp_data/HighsOptions.h
+ * @param {string | Uint8Array} model_str The problem to solve in the .lp format
+ * @param {undefined | import("../types").HighsOptions} highs_options Options to pass the solver. See https://github.com/ERGO-Code/HiGHS/blob/v1.14.0/highs/lp_data/HighsOptions.h
  * @returns {import("../types").HighsSolution} The solution
  */
 Module["solve"] = function (model_str, highs_options) {
-  FS.writeFile(MODEL_FILENAME, model_str);
-  const highs = _Highs_create();
-  assert_ok(
-    () => Module.Highs_readModel(highs, MODEL_FILENAME),
-    "read LP model (see http://web.mit.edu/lpsolve/doc/CPLEX-format.htm)"
-  );
-  const options = highs_options || {};
-  for (const option_name in options) {
-    const option_value = options[option_name];
-    const type = typeof option_value;
-    let setoption;
-    if (type === "number") setoption = setNumericOption;
-    else if (type === "boolean") setoption = Highs_setBoolOptionValue;
-    else if (type === "string") setoption = Highs_setStringOptionValue;
-    else
-      throw new Error(
-        `Unsupported option value type ${option_value} for '${option_name}'`
-      );
-    assert_ok(
-      () => setoption(highs, option_name, option_value),
-      `set option '${option_name}'`
-    );
-  }
-  assert_ok(() => _Highs_run(highs), "solve the problem");
-  const status =
-    MODEL_STATUS_CODES[_Highs_getModelStatus(highs, 0)] || "Unknown";
-  // Flush the content of stdout in order to have a clean stream before writing the solution in it
-  stdout_lines.length = 0;
-  assert_ok(
-    () => Module.Highs_writeSolutionPretty(highs, ""),
-    "write and extract solution"
-  );
-  _Highs_destroy(highs);
-  const output = parseResult(stdout_lines, status);
-  // Flush the content of stdout and stderr because these streams are not used anymore
+  // Clear buffers at the start to prevent stale data from prior solves
   stdout_lines.length = 0;
   stderr_lines.length = 0;
-  return output;
+
+  validateLP(model_str);
+
+  FS.writeFile(MODEL_FILENAME, model_str);
+  const highs = _Highs_create();
+  try {
+    assert_ok(
+      () => Module.Highs_readModel(highs, MODEL_FILENAME),
+      "read LP model (see http://web.mit.edu/lpsolve/doc/CPLEX-format.htm)"
+    );
+    const options = highs_options || {};
+    for (const option_name in options) {
+      const option_value = options[option_name];
+      const type = typeof option_value;
+      let setoption;
+      if (type === "number") setoption = setNumericOption;
+      else if (type === "boolean") setoption = Highs_setBoolOptionValue;
+      else if (type === "string") setoption = Highs_setStringOptionValue;
+      else
+        throw new Error(
+          `Unsupported option value type ${option_value} for '${option_name}'`
+        );
+      assert_ok(
+        () => setoption(highs, option_name, option_value),
+        `set option '${option_name}'`
+      );
+    }
+    assert_ok(() => _Highs_run(highs), "solve the problem");
+    const status =
+      MODEL_STATUS_CODES[_Highs_getModelStatus(highs, 0)] || "Unknown";
+
+    // Snapshot solver logs before clearing stdout for solution parsing
+    const solverOutput = stderr_lines.slice();
+
+    if (STATUSES_WITHOUT_SOLUTION.has(status)) {
+      return {
+        "Status": /** @type {import("../types").HighsModelStatus} */ (status),
+        "Columns": {},
+        "Rows": [],
+        "ObjectiveValue": 0,
+        "Output": solverOutput,
+      };
+    }
+
+    // Flush stdout before writing solution to get a clean stream
+    stdout_lines.length = 0;
+    assert_ok(
+      () => Module.Highs_writeSolutionPretty(highs, ""),
+      "write and extract solution"
+    );
+
+    var output = parseResult(stdout_lines, status);
+    output["Output"] = solverOutput;
+    return output;
+  } finally {
+    _Highs_destroy(highs);
+    stdout_lines.length = 0;
+    stderr_lines.length = 0;
+  }
 };
 
 function setNumericOption(highs, option_name, option_value) {
@@ -165,32 +239,53 @@ function parseResult(lines, status) {
   if (lines.length < 3)
     throw new Error("Unable to parse solution. Too few lines.");
 
-  let headers = headersForNonEmptyColumns(lines[1], lines[2]);
-
   var result = {
-    "Status": /** @type {"Infeasible"} */ (status),
+    "Status": /** @type {import("../types").HighsModelStatus} */ (status),
     "Columns": {},
     "Rows": [],
     "ObjectiveValue": NaN,
   };
 
+  // Find section markers by scanning (v1.14 may prepend warnings before "Columns")
+  var colIdx = -1;
+  var rowsIdx = -1;
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i] === "Columns" && colIdx < 0) colIdx = i;
+    else if (lines[i] === "Rows" && rowsIdx < 0) rowsIdx = i;
+  }
+
+  if (colIdx < 0 || colIdx + 2 >= lines.length)
+    throw new Error("Unable to find Columns section in solution output.");
+
   // Parse columns
-  for (var i = 2; lines[i] != "Rows"; i++) {
-    const obj = lineToObj(headers, lines[i]);
+  var headers = headersForNonEmptyColumns(lines[colIdx + 1], lines[colIdx + 2]);
+  var colEnd = rowsIdx >= 0 ? rowsIdx : lines.length;
+  for (var c = colIdx + 2; c < colEnd; c++) {
+    if (lines[c] === "" || lines[c].match(/Objective value:/)) break;
+    var obj = lineToObj(headers, lines[c]);
     if (!obj["Type"]) obj["Type"] = "Continuous";
     result["Columns"][obj["Name"]] = obj;
   }
 
-  // Parse rows
-  headers = headersForNonEmptyColumns(lines[i + 1], lines[i + 2]);
-  for (var j = i + 2; lines[j] != ""; j++) {
-    result["Rows"].push(lineToObj(headers, lines[j]));
+  // Parse rows (if "Rows" section exists and has data)
+  var objStart = colEnd;
+  if (rowsIdx >= 0 && rowsIdx + 2 < lines.length && lines[rowsIdx + 2] !== "") {
+    headers = headersForNonEmptyColumns(lines[rowsIdx + 1], lines[rowsIdx + 2]);
+    for (var j = rowsIdx + 2; j < lines.length && lines[j] !== ""; j++) {
+      result["Rows"].push(lineToObj(headers, lines[j]));
+    }
+    objStart = j;
   }
 
-  // Parse objective value
-  result["ObjectiveValue"] = parseNum(
-    lines[j + 3].match(/Objective value: (.+)/)[1]
-  );
+  // Parse objective value — scan forward for the "Objective value:" line
+  for (var k = objStart; k < lines.length; k++) {
+    var objMatch = lines[k].match(/Objective value: (.+)/);
+    if (objMatch) {
+      result["ObjectiveValue"] = parseNum(objMatch[1]);
+      break;
+    }
+  }
+
   return result;
 }
 
@@ -222,6 +317,11 @@ function assert_ok(fn, action) {
   }
   // Allow HighsStatus::kOk (0) and HighsStatus::kWarning (1) but
   // disallow other values, such as e.g. HighsStatus::kError (-1).
-  if (err !== 0 && err !== 1)
-    throw new Error("Unable to " + action + ". HiGHS error " + err);
+  if (err !== 0 && err !== 1) {
+    let message = "Unable to " + action + ". HiGHS error " + err;
+    if (stderr_lines.length > 0) {
+      message += "\nSolver output:\n" + stderr_lines.join("\n");
+    }
+    throw new Error(message);
+  }
 }
