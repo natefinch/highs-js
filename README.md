@@ -1,15 +1,11 @@
 # highs-js
 
-[![npm version](https://badge.fury.io/js/highs.svg)](https://www.npmjs.com/package/highs)
-[![CI status](https://github.com/lovasoa/highs-js/actions/workflows/CI.yml/badge.svg)](https://github.com/lovasoa/highs-js/actions/workflows/CI.yml)
-[![package size](https://badgen.net/bundlephobia/minzip/highs)](https://bundlephobia.com/result?p=highs)
+**Updated from upstream fork with latest version of HIGHs.**
+
+[![CI status](https://github.com/natefinch/highs-js/actions/workflows/CI.yml/badge.svg)](https://github.com/natefinch/highs-js/actions/workflows/CI.yml)
 
 This is a javascript mixed integer linear programming library.
 It is built by compiling a high-performance C++ solver developed by the University of Edinburgh, ([HiGHS](https://highs.dev)), to WebAssembly using emscripten.
-
-## Demo
-
-See the online demo at: https://lovasoa.github.io/highs-js/
 
 ## Usage
 
@@ -100,7 +96,7 @@ const EXPECTED_SOLUTION = {
     {
       Index: 2,
       Name: 'c3',
-      Status: 'UB',
+      Status: 'FX',
       Lower: 0,
       Upper: 0,
       Primal: 0,
@@ -154,4 +150,35 @@ const sol = highs.solve(PROBLEM, {
   "run_crossover": true,
   "presolve": "on",
 });
+```
+
+## Building and Testing
+
+Building highs-js compiles the HiGHS C++ solver to WebAssembly using [Emscripten](https://emscripten.org/).
+
+### Prerequisites
+
+- **Emscripten** (emsdk) — provides `emcmake`, `emmake`, and `emcc`
+- **CMake**
+- **Node.js**
+
+On macOS with Homebrew:
+
+```sh
+brew install emscripten cmake
+```
+
+On other platforms, follow the [Emscripten installation guide](https://emscripten.org/docs/getting_started/downloads.html).
+
+### Build
+
+```sh
+npm ci          # install dependencies
+npm run build   # compile HiGHS to WebAssembly (output in build/)
+```
+
+### Test
+
+```sh
+npm test        # runs TypeScript type-checking (tsc) then node tests/test.js
 ```
